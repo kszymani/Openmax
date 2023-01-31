@@ -14,7 +14,6 @@ from keras.preprocessing.image import ImageDataGenerator
 from keras.utils import to_categorical
 from sklearn.model_selection import train_test_split
 from keras.backend import manual_variable_initialization
-manual_variable_initialization(True)
 dataset = mnist
 # dataset = fashion_mnist
 
@@ -27,21 +26,15 @@ def Inception(_in, filters=None):
         filters = [10, 10, 10]
     col_1 = Conv2D(filters[0], (1, 1), padding='same', activation='relu', kernel_initializer='he_normal')(_in)
     col_1 = Conv2D(filters[0], (3, 3), padding='same', activation='relu', kernel_initializer='he_normal')(col_1)
-
     col_2 = Conv2D(filters[1], (1, 1), padding='same', activation='relu', kernel_initializer='he_normal')(_in)
     col_2 = Conv2D(filters[1], (5, 5), padding='same', activation='relu', kernel_initializer='he_normal')(col_2)
-
     col_3 = MaxPooling2D((3, 3), strides=(1, 1), padding='same')(_in)
     col_3 = Conv2D(filters[2], (1, 1), padding='same', activation='relu', kernel_initializer='he_normal')(col_3)
-
     out = concatenate([col_1, col_2, col_3])  # output size W x H x (f0 + f1 + f2)
     return out
 
 
 def SqueezeExcite(_in, ratio=8):
-    """Squeeze-and-Excitation layers are considered to improve CNN performance.
-    `Find out more <https://doi.org/10.48550/arXiv.1709.01507>`
-    """
     filters = _in.shape[-1]
     x = GlobalAveragePooling2D()(_in)
     x = Dense(filters // ratio, activation='relu', kernel_initializer='he_normal', use_bias=False)(x)
@@ -49,14 +42,11 @@ def SqueezeExcite(_in, ratio=8):
     return multiply([_in, x])
 
 
-def create_model(input_shape, n_classes):
+def mnist_model(input_shape, n_classes):
     _in = Input(shape=input_shape)
-    x = _in
-    x = Conv2D(64, (5, 5), padding='same', strides=(2, 2), activation='relu', kernel_initializer='he_normal')(x)
+    x = Conv2D(64, (5, 5), padding='same', strides=(2, 2), activation='relu', kernel_initializer='he_normal')(_in)
     x = SqueezeExcite(x)
     x = MaxPool2D((3, 3), padding='same', strides=(2, 2), )(x)
-    # x = Conv2D(64, (1, 1), padding='same', strides=(1, 1), activation='relu', kernel_initializer='he_normal')(x)
-    # x = SqueezeExcite(x)
     x = Conv2D(128, (3, 3), padding='same', strides=(1, 1), activation='relu', kernel_initializer='he_normal')(x)
     x = SqueezeExcite(x)
     x = Inception(x, filters=[64, 64, 64])
@@ -68,8 +58,7 @@ def create_model(input_shape, n_classes):
     x = Softmax()(x)
     model = Model(_in, x)
     model.compile(loss=categorical_crossentropy,
-                  # optimizer=SGD(learning_rate=1e-4, momentum=0.9),
-                  optimizer=Adam(learning_rate=1e-3, decay=0.01),
+                  optimizer=Adam(learning_rate=1e-3),
                   metrics=['accuracy'])
     model.summary()
     return model
@@ -146,7 +135,7 @@ def main():
 
     print("number of classes:", K)
     print("input shape", x_train[0].shape)
-    model = create_model(x_train[0].shape, K)
+    model = mnist_model(x_train[0].shape, K)
 
     x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.15, shuffle=True)
 
