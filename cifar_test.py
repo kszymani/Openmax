@@ -9,12 +9,13 @@ from keras.models import Model
 from keras.models import load_model
 from skimage.color import rgb2gray
 from skimage.transform import resize
-from tensorflow.python.client import device_lib
-print(device_lib.list_local_devices())
 
 dataset = mnist
-eu_weight = 0.000001
-tail = 300
+eu_weight = 1e-28
+cos_weight = 1e-10
+tail = 500
+test_size = 2500
+
 
 def calculate_logits_and_predictions(model: Model, x_train, classes):
     model_without_softmax = Model(inputs=model.input, outputs=model.layers[-2].output)
@@ -27,7 +28,7 @@ def calculate_logits_and_predictions(model: Model, x_train, classes):
 def run_test(model, classes, weinbull_models, x_test, y_test):
     model = Model(inputs=model.input, outputs=model.layers[-2].output)
     logits = model.predict(x_test)
-    openmax_probabs = np.array([recalibrate_scores(weinbull_models, lg, classes, alpharank=10) for lg in logits])
+    openmax_probabs = np.array([recalibrate_scores(weinbull_models, lg, classes, alpharank=len(classes)) for lg in logits])
     softmax_prob = np.array([softmax(lg) for lg in logits])
     softmax_cl = np.argmax(softmax_prob, axis=-1)
     openmax_cl = np.argmax(openmax_probabs, axis=-1)
@@ -65,39 +66,48 @@ def fit_weibull(activations, predictions, true_labels, classes, taillength):
         i = np.where(predictions[correct] == cl)[0]
         act = activations[i, :]
         mean_act = np.mean(act, axis=0)
+        # Compute all, for this class, correctly classified images' distance to the MAV.
         tailtofit = sorted(
-            [spd.euclidean(mean_act, act[col, :]) * eu_weight + spd.cosine(mean_act, act[col, :])
+            [spd.euclidean(mean_act, act[col, :]) * eu_weight + cos_weight*spd.cosine(mean_act, act[col, :])
              for col in range(len(act))]
         )[-taillength:]
+        print(tailtofit)
+        print(f"{mean_act=}")
         weibull_model[cl] = {}
         weibull_model[cl]['mav'] = mean_act
         mr = libmr.MR(verbose=True)
         mr.fit_high(tailtofit, taillength)
         weibull_model[cl]['model'] = mr
+
     return weibull_model
 
 
 def recalibrate_scores(weibull_model, img_layer_act, classes, alpharank=10):
     num_labels = len(classes)
+    # Sort index of activations from highest to lowest.
     ranked_list = np.argsort(img_layer_act)
     ranked_list = np.ravel(ranked_list)
     ranked_list = ranked_list[::-1]
+    # Obtain alpha weights for highest -> lowest activations.
     alpha_weights = [((alpharank + 1) - i) / float(alpharank) for i in range(1, alpharank + 1)]
     ranked_alpha = np.zeros(num_labels)
     for i, a in enumerate(alpha_weights):
         ranked_alpha[ranked_list[i]] = a
+    # Calculate OpenMax probabilities
     openmax_penultimate, openmax_penultimate_unknown = [], []
     for categoryid in classes:
-        label_weibull = weibull_model[categoryid]['model']
-        label_mav = weibull_model[categoryid]['mav']
-        img_dist = spd.euclidean(label_mav, img_layer_act) * eu_weight + spd.cosine(label_mav, img_layer_act)
+        label_weibull = weibull_model[categoryid]['model']  # Obtain the corresponding Weibull model.
+        label_mav = weibull_model[categoryid]['mav']  # Obtain MAV for specific class.
+
+        img_dist = spd.euclidean(label_mav, img_layer_act) * eu_weight + cos_weight * spd.cosine(label_mav, img_layer_act)
         weibull_score = label_weibull.w_score(img_dist)
-        modified_layer_act = img_layer_act[categoryid] * (1 - weibull_score * ranked_alpha[categoryid])
-        openmax_penultimate += [modified_layer_act]
-        openmax_penultimate_unknown += [img_layer_act[categoryid] - modified_layer_act]
+        modified_layer_act = img_layer_act[categoryid] * (1 - weibull_score * ranked_alpha[categoryid])  # Revise av.
+        openmax_penultimate += [modified_layer_act]  # Append revised av. to a total list.
+        openmax_penultimate_unknown += [img_layer_act[categoryid] - modified_layer_act]  # A.v. 'unknown unknowns'.
 
     openmax_closedset_logit = np.asarray(openmax_penultimate)
     openmax_openset_logit = np.sum(openmax_penultimate_unknown)
+    # Transform the recalibrated penultimate layer scores for the image into OpenMax probability.
     openmax_probab = compute_open_max_probability(openmax_closedset_logit, openmax_openset_logit, classes)
     return openmax_probab
 
@@ -121,35 +131,40 @@ def compute_open_max_probability(openmax_known_score, openmax_unknown_score, cla
     prob_closed = scores / total_denominator
     prob_open = np.exp(openmax_unknown_score) / total_denominator
     probs = np.append(prob_closed, prob_open)
-    assert len(probs) == 11
+    assert len(probs) == len(classes) + 1
     return probs
 
 
 def main():
-    (x_train, y_train), (x_test, y_test) = dataset.load_data()
-    y_train, y_test = y_train.flatten(), y_test.flatten()
-    classes = np.unique(y_train)
+    animal_labels = np.array([2, 3, 4, 5, 6])
+    vehicle_labels = np.array([0, 1, 7, 8, 9])
 
-    x_train = np.expand_dims(x_train, axis=-1) / 255
-    x_test = np.expand_dims(x_test, axis=-1) / 255
-    model = load_model("mnist")
+    (x_train_all, y_train_all), (x_test_all, y_test_all) = cifar10.load_data()
+    labels = vehicle_labels
+
+    y_train_all, y_test_all = y_train_all.flatten(), y_test_all.flatten()
+    x_train = x_train_all[np.isin(y_train_all, labels, ).ravel()]/255
+    y_train = y_train_all[np.isin(y_train_all, labels, ).ravel()]
+    x_test = x_test_all[np.isin(y_test_all, labels, ).ravel()]/255
+    y_test = y_test_all[np.isin(y_test_all, labels, ).ravel()]
+
+    # x_train = np.expand_dims(x_train, axis=-1)
+    # x_test = np.expand_dims(x_test, axis=-1)
+
+    classes = list(range(len(animal_labels)))
+    print(classes)
+    for i, v in enumerate(labels):
+        y_train[y_train == v] = i
+    for i, v in enumerate(labels):
+        y_test[y_test == v] = i
+
+    K = len(classes)
+    model = load_model("cifar-vehicles")
     logits, predictions = calculate_logits_and_predictions(model, x_train, classes)
 
     weinbull_models = fit_weibull(logits, predictions, y_train, classes, taillength=tail)
-
-    (_, _,), (x_f, y_f) = cifar10.load_data()
-    x_f = np.expand_dims(
-        np.array([resize(rgb2gray(im) / 255, (x_test[0].shape[0], x_test[0].shape[1]), anti_aliasing=True) for im in
-                  x_f]),
-        axis=-1)
-    fig, ax = plt.subplots(1, 4, figsize=(10, 10))
-    for i in range(4):
-        ax[i].imshow(x_f[random.randint(0, 1000)], cmap='gray')
-    plt.show()
-    fig, ax = plt.subplots(1, 4, figsize=(10, 10))
-    for i in range(4):
-        ax[i].imshow(x_test[random.randint(0, 1000)], cmap='gray')
-    plt.show()
+    x_f = x_test_all[np.isin(y_test_all, animal_labels, ).ravel()]/255
+    # x_f = x_f[np.random.randint(len(x_f), size=test_size)]
     print("\nActual: ")
     run_test(model, classes, weinbull_models, x_test, y_test)
     print("\nFooling: ")
